@@ -1,0 +1,449 @@
+#!/usr/bin/awk -f
+#
+
+
+function error(s) {
+	printf ("%s: %s\n", program, s) >>STDERR;
+	exit (1);
+	}
+
+
+# *is_disabled*() returns `1` if the service definition
+# line is disabled.
+function is_disabled(line,   f) {
+	f = line ~ /^[ \t]*#-#/;
+	return (f);
+	}
+
+# *enable_disable*() toggles the enable state of line.
+function enable_disable(line) {
+	if (is_disabled(line))
+		sub(/^[ \t]*#-#/, "#", line);
+	else
+		sub(/^[ \t]*#?/, "#-#", line);
+
+	return (line);
+	}
+
+# *_get_group*() splits the string _s_ into chars and uses them
+# as index to _groups_.  If the char is followed by a digit
+# from 1 to 9 the digit becomes the char's value in _groups_
+# being the indicator for the chosen radio group variant.
+function _get_groups(s, groups, del,   c, d, i, n) {
+	if (del != 0)
+		delete groups;
+
+	n = length(s);
+	for (i = 1; i <= n; i++) {
+		c = substr(s, i, 1);
+		if (c !~ /[a-zA-Z]/)
+			continue;
+
+		groups[c] = "";
+
+		# If the next char is a digit it is a radio group
+		# variant identifier.
+		if (i < n  &&  (d = substr(s, i + 1, 1)) ~ /[0-9]/) {
+			groups[c] = d;
+			i++;
+			}
+		}
+	}
+
+# *_getid*() extracts the command's id from the already splitted
+# inittab line stored in _x_[] and stores them in the array _id_.
+# 
+# if *erase_2* is != 0 then all assignments from the runlevel
+# field are deleted leaving only the single-char group indicators.
+function _getid(parts, id, erase_2,   n, p) {
+	delete id;
+
+	# Extract the id from the runlevel field.
+	if (match(x[2], /id=[^ ]+/) > 0) {
+		id[++n] = p = substr(x[2], RSTART + 3, RLENGTH - 3);
+		id[p] = 1;
+		return (id[0] = n);
+		}
+
+	# Remove assignments if requested.
+	if (erase_2 != 0)
+		gsub(/(^| *)[a-z]+=[^ ]*/, "", x[2]);
+
+
+	# Get the program's name as alternative id.  `busybox` and
+	# `start` are ignored and the next word is taken instead.
+	p = x[4];
+	sub(/^[ \t]*((busybox|[^ ]+\/start) )? */, "", p);
+	sub(/^[^ \t]+\//, "", p);	# Remove path.
+	sub(/[ \t].*$/, "", p);		# Remove arguments.
+
+	id[++n] = p;
+	id[p] = 1;
+
+	id[0] = n;
+	return (n);
+	}
+
+
+function nextarg(name,   k, p) {
+	if (argi >= ARGC)
+		error("missing argument: " name);
+
+	p = ARGV[argi];
+	ARGV[argi++] = "";
+
+	return (p);
+	}
+
+BEGIN {
+	program = "edit-inittab";
+	STDERR = "/dev/stderr";
+	_DELETED = "\001";
+
+	file = "/etc/inittab";
+
+	argi = 1;
+	while (argi < ARGC  &&  substr(ARGV[argi], 1, 2) == "--") {
+		if ((p = ARGV[argi]) == "--print") {
+			nextarg("");
+			print_only = 1;
+			}
+		else if (p ~ /--mods?/) {
+			nextarg("");
+			print_only = print_mod = 1;
+			}
+		else if (p == "--file") {
+			nextarg("");
+			file = nextarg("filename");
+			}
+		else
+			break;
+		}
+
+	# Read file.
+	while (getline p <file > 0) {
+		sub(/[ \t\r]*$/, "", p);
+		text = text p "\n";
+		line[++lines] = p;
+		}
+
+	close (file);
+
+	# Create backup.  Will fail on missing permissions.
+	if (print_only == 0) {
+		bkp = file "~";
+		printf ("%s", text) >bkp;
+		}
+
+	while (argi < ARGC) {
+		select_by_id = 0;
+		delete selection;
+
+		# Get the (next) operation.
+		opt = nextarg("command");
+		sub(/^--/, "", opt);
+#print "##", opt >>STDERR;
+		mode = "";
+		_add_line = "";
+		if (opt == "start")
+			mode = "+";
+		else if (opt == "stop")
+			mode = "-";
+		else if (opt == "goto")
+			mode = "=";
+		else if (opt == "stop-all") {
+			mode = "=";
+			activate = ".";
+			}
+		else if (opt == "print") {
+			print_only = 1;
+			continue;
+			}
+		else if (opt == "mod") {
+			print_only = print_mod = 1;
+			continue;
+			}
+		else if (opt ~ /^(remove|add|enable|disable|conf)$/)
+			;
+		else if (match(opt, /^[-+=~]?g=/) > 0)
+			;
+		else
+			error("bad option: " opt);
+
+
+		if (opt == "add") {
+			# The add operation defines a new entry.  The ids
+			# from that entry define the selection for removal.
+			split(p = nextarg("inittab entry"), x, ":");
+			if (x[2] == "")
+				error("need runlevel info: " p);
+
+			_getid(x, selected_name, 0);
+
+			# Remove the numeric entries and keep the id
+			# names in the set.
+			for (i = 1; i <= selected_name[0]; i++)
+				delete selected_name[i];
+for (i in selected_name) print "//", i >>STDERR;
+
+			_add_line = p;
+			select_by_id = 1;
+			}
+		else if (match(opt, /^[-+=~]?g=/) > 0) {
+			if (opt ~ /^[-+=~]/)
+				mode = mode == ""? substr(opt, 1, 1): mode;
+			else if (mode == "")
+				mode = "=";
+
+
+			activate = substr(opt, 1 + RLENGTH);
+
+			# Get chars for group selection.
+			_get_groups(activate, selection);
+			}
+		else {
+			select_by_id = 1;
+			delete selection;
+			delete selected_name;
+			while (argi < ARGC  &&  substr(ARGV[argi], 1, 1) !~ /[-+=~]/) {
+				n = split(nextarg("service id"), x, /[ ,:]+/);
+				for (i = 1; i <= n; i++) {
+#print "..", x[i] >>STDERR;
+					if (x[i] ~ /^g=/)
+						_get_groups(substr(x[i], 3), selection, 0);
+					else
+						selected_name[ x[i] ] = 1;
+					}
+				}
+			}
+
+		# selection[] is the set of selected group chars
+		# and selected_name[] store service names/ids.
+		#
+		# Now that we have the current operation plus the
+		# selection we go through inittab.
+		for (i = 1; i <= lines; i++) {
+			if (line[i] == "")
+				continue;
+
+			# Consider only lines with non-empty runlevel field.
+			split(line[i], x, ":");
+			if (x[2] == "")
+				continue;
+
+
+			# Read configuration information from
+			# runlevel field.
+			_getid(x, id, 1);
+			_get_groups(x[2], groups, 1);
+
+			# Is the service selected?  Default is `no`.
+			f = 0;
+			is_radio_group = "";
+			if (activate == ".")
+				;
+#			else if (select_by_id == 1) {
+#				for (j = 1; f == 0  &&  j <= id[0]; j++) {
+#					f = id[j] in selection_name;
+#					}
+#				}
+			else {
+				# Select by group indicator: is one of the
+				# configured groups in the selection?
+				for (c in groups) {
+					if (c in selection) {
+						f = 1;
+						break;
+						}
+					}
+
+#if (f == 1) print "**", f, c, ">" selection[c] "<", ":" groups[c] ":", "#" is_radio_group "#", line[i] >>STDERR;
+				if (f == 1) {
+					# If we have a radio group parameter but
+					# the entry service configuration does not
+					# we skip this entry.
+					if (selection[c] == ""  &&  groups[c] != "")
+						continue;
+					# Same but the opposite.
+					else if (selection[c] != ""  &&  groups[c] == "")
+						continue;
+
+					# Effectively, radio group identifiers must
+					# be in the configuration and the selection
+					# or not in both.
+					}
+
+				if (f == 1) {
+				#	f = selection[c] != groups[c];
+#					if (selection[c] != groups[c])
+#						continue;
+					}
+
+				if (f == 1  &&  selection[c] != "") {
+					is_radio_group = groups[c] == selection[c]? "+": "-";
+					}
+
+				if (f == 0) {
+					for (j = 1; f == 0  &&  j <= id[0]; j++)
+						f = id[j] in selected_name;
+
+					is_radio_group = "";
+					}
+#print "!!", mode, line[i], c, f, enable, groups[c], c in selection, is_radio_group >>STDERR;
+				}
+
+
+			# Operations other than start/stop.
+			g = (f  &&  is_radio_group != "-");
+			if (opt == "enable") {
+				if (g == 1  &&  is_disabled(line[i])) {
+					line[i] = enable_disable(line[i]);
+					_mod = _mod line[i] "\n";
+					}
+
+				continue;
+				}
+			else if (opt == "disable") {
+				if (g == 1  &&  is_disabled(line[i]) == 0) {
+					line[i] = enable_disable(line[i]);
+					_mod = _mod line[i] "\n";
+					}
+
+				continue;
+				}
+			else if (opt == "remove") {
+				# Remove matching lines.
+				if (g != 0) {
+					_mod = _mod "- " line[i] "\n";
+					line[i] = _DELETED;
+					}
+
+				continue;
+				}
+			else if (opt == "add") {
+print "**", f, line[i] >>STDERR;
+				if (f != 0) {
+					# The first matching lines is replaced
+					# with the added ...
+					if (_add_line != "") {
+						line[i] = _add_line;
+						_add_line = "";
+						_mod = _mod line[i] "\n";
+						}
+					else {
+print "xx", line[i] >>STDERR;
+						# ... and later matches are
+						# removed.
+						line[i] = _DELETED;
+						}
+					}
+
+				continue;
+				}
+			else if (opt == "conf") {
+				if (f != 0  ||
+				    (length(selection) + length(selected_name) == 0) ) {
+					_mod = _mod line[i] "\n";
+					}
+
+				continue;
+				}
+			else if (is_disabled(line[i]))
+				continue;
+
+
+			# The start/stop logic is here.
+
+#print "!!", mode, c, f, enable, groups[c], c in selection, is_radio_group >>STDERR;
+			if (mode == "~") {
+				# The `~` means: items from all other
+				# radio groups but not from the selected.
+				if (is_radio_group != "-")
+					continue;
+
+				# Make following `f` computation work.
+				is_radio_group = "+";
+				}
+
+			if (is_radio_group != "")
+				f = f  &&  is_radio_group == "+";
+
+			if (mode == "=")
+				enable = f;
+			else if (f == 1)
+				enable = mode == "+"? 1: 0;
+			else
+				continue;
+
+			# Radio group selection has only an effect if a
+			# service is started: Do not start services
+			# from an unselected radio group.
+			if (enable == 1  &&  is_radio_group == "-")
+				enable = 0;
+
+
+			if (enable == 0) {
+				if (line[i] !~ /^[ \t]*#/)
+					line[i] = "#" line[i];
+				else
+					continue;
+				}
+			else {
+				if (line[i] ~ /^[ \t]*#/)
+					sub(/^[ \t]*#[ \t]*/, "", line[i]);
+				else
+					continue;
+
+				# If a start a service is part of a radio
+				# group we stop the other variants.  This
+				# is done by adding commands to ARGV.
+				for (c in groups) {
+					if (groups[c] != "") {
+						p = "~g=" c groups[c];
+#print "--", p, _have_cmd[p] >>STDERR;
+						if (_have_cmd[p] == 0) {
+							ARGV[ARGC++] = p;
+							_have_cmd[p] = 1;
+							}
+						}
+					}
+				}
+
+			# The current line was changed.
+			_mod = _mod line[i] "\n";
+			}
+
+		if (_add_line != "")
+			_add_text = _add_text _add_line "\n";
+		}
+
+	if (print_mod != 0  ||  opt == "--conf") {
+		printf ("%s%s", _mod, _add_text);
+		exit (0);
+		}
+
+	text = "";
+	for (i = 1; i <= lines; i++) {
+		if (line[i] == _DELETED)
+			continue;
+
+		text = text line[i] "\n";
+		}
+
+	if (_add_text != "") {
+		if (text !~ /\n\n$/)
+			_add_text = "\n" _add_text;
+
+		text = text _add_text;
+		}
+
+	if (print_only != 0)
+		printf ("%s", text);
+	else {
+		printf ("%s", text) >file;
+		close (file);
+		}
+
+	exit (0);
+	}
+

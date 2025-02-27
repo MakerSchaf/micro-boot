@@ -1,0 +1,20 @@
+#!/bin/sh
+#
+
+DIR=${0%/*}
+. $DIR/environment  ||  exit 1
+
+CF="$CONF/usb-dhcpd.conf"
+
+if [ ! -f "$CF" ]; then
+    cat >"$CF" <<-EOF
+	interface     usb0
+	start         169.254.1.20
+	end           169.254.1.254
+	pidfile       $RTD/udhcpd.pid
+	lease_file    $RTD/udhcpd.leases
+	EOF
+fi
+
+exec busybox udhcpd -f -S "$CF"
+

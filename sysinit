@@ -1,0 +1,126 @@
+#!/bin/sh
+#
+
+# micro-boot-2 sysinit script
+
+# Set the time and start logging.
+fake-hwclock load
+exec >/run/sysinit.log 2>&1
+echo "** Starting sysinit: $(cat /proc/uptime)"
+
+
+export MB_BIN=${0%/*}
+export MB_CONF="$MB_BIN"
+PATH="$MB_BIN:$PATH"
+
+
+MOUNT_FSTAB="no"
+INIT_CONSOLE="no"
+MAKE_SWAP="no"
+LED_PIN="18"
+#HAVE_MAKER_PHAT="y"
+
+. "$MB_BIN/environment"
+
+
+[ "$LED_PIN" != "" ]  &&  pinctrl set "$LED_PIN" op dh
+
+# Basic system init.
+mount -o remount,rw /
+hostname -F /etc/hostname
+ifconfig lo 127.0.0.1 netmask 255.0.0.0
+
+
+# Make some directories
+export RTD=${RTD-/run/micro-boot}
+mkdir -p /run/dbus /run/sshd "$RTD"
+
+
+# Load the wifi network driver.
+modprobe brcmfmac
+rfkill unblock wlan
+
+
+# Mount configfs if not already done.
+mount -t configfs -o nodev,noexec,relatime,rw,nosuid \
+    configfs /sys/kernel/config
+
+
+# Mount local partitions.
+#
+# This mounts the boot partition /dev/mmcblk0p1 (and all other
+# stuff from fstab).
+#
+if [ "$MOUNT_FSTAB" = "yes" ]; then
+    fsck -p -A -R </dev/console >/dev/console 2>&1
+    DIRS=$(awk '$1 ~ /^PART/  &&  $2 != "/" { print $2 }' /etc/fstab)
+    for D in $DIRS; do
+	mount "$D"
+    done
+
+    # Prepare a safe reboot in case we fail.
+#    mountpoint -q /boot/firmware  &&
+#      cp $MB_CONF/cmdline.txt.ub /boot/firmware/cmdline.txt
+fi
+
+
+# Create swap space.
+if [ "$MAKE_SWAP" = "yes" ]; then
+    /sbin/dphys-swapfile setup
+    /sbin/dphys-swapfile swapon
+fi
+
+
+# Load keymap.
+#
+# Can be deactivated and the user-login script does this when
+# a login is activated.
+if [ "$INIT_CONSOLE" = "yes" ]; then
+    setupcon
+    which gpm >/dev/null  &&  /usr/share/gpm/gpm-systemd-wrapper.sh
+fi
+
+
+# Support for screen if installed.
+which screen >/dev/null  &&  mkdir -m 0777 /run/screen
+
+
+# Query the maker-phat buttons to set the gadget mode.
+if [ "$HAVE_MAKER_PHAT" = "y" ]; then
+	# Check buttons for gadget mode.
+	gmode=$( pinctrl 21,16,20 | awk '
+		$5 == "lo" {
+			print $0 >>"/dev/stderr";
+			pin[$1+0] = 1;
+			n++;
+			}
+
+		END {
+			if (n > 1)
+				print "serial";
+			else if (pin[21] != 0)
+				print "eth";
+			else if (pin[16] != 0)
+				print "mtp";
+			else if (pin[20] != 0)
+				print "rndis";
+			}' )
+
+	if [ "$gmode" != "" ]  &&  [ "$PHAT_MODE_PERMA" = "y" ]; then
+		echo $gmode >$MB_BIN/gadget-mode
+	fi
+fi
+
+if [ "$LED_PIN" != "" ]; then
+    pinctrl set "$LED_PIN" op dl
+fi
+
+# Configure the gadget.
+echo "gmode: $gmode"
+activate-gadget "$gmode"
+
+
+echo "System ready. $(date)" >/dev/console
+echo "** sysinit complete: $(cat /proc/uptime)"
+
+

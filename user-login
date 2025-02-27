@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+
+[ "$1" = "" ]  &&  user=pi  ||  user="$1"
+uid=$(id -u $user)
+
+# Initialize the keyboard
+setupcon
+
+# Start gpm if installed and not running.
+if [ -x "/usr/share/gpm/gpm-systemd-wrapper.sh" ]; then
+   pid=$(pgrep -f '/usr/sbin/gpm .*')
+   [ "$pid" = "" ]  &&  /usr/share/gpm/gpm-systemd-wrapper.sh
+fi
+
+# Create thr user directory.
+if [ "$uid" != "" ]; then
+    run=/run/user/"$uid"
+    mkdir -p "$run"  &&  chown "$user" "$run"  &&  chmod 700 "$run"
+fi
+
+# Start the user shell.
+exec login -f $user
+

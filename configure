@@ -1,0 +1,67 @@
+#!/bin/sh
+
+
+# Append to logfile if not running from a terminal.
+! tty -s  &&  exec >>/run/sysinit.log 2>&1
+
+
+# Use `configure --print` to see changes to inittab.
+[ "$#" != 0  -a  "$1" != "--print" ]  &&  { echo $0: bad option: $1; exit 1; }
+
+
+# Scripts and config files are in the same location.
+DIR=${0%/*}
+CONF="$DIR"
+
+. "$DIR/environment"  ||  exit 1
+
+export RTD=${RTD-/run/micro-boot}
+mkdir -p "$RTD"
+chown "$USERNAME" "$RTD"
+
+
+# It all starts with networking: what do we have?
+IF_LIST=$(ifconfig -a |
+	  awk '$1 ~ /:$/ { print substr($1, 1, length($1) - 1) }')
+for IFC in $IF_LIST; do
+  case "$IFC" in
+    lo)		;;
+    usb0)	ENABLE="${ENABLE}un"; NET=y;;
+    wlan0)	ENABLE="${ENABLE}wn"; NET=y;;
+    eth0)	ENABLE="${ENABLE}en"; NET=y;;
+  esac
+done
+
+# If the gadget is prepared for MTP start the daemon.
+#$DIR/conf.umtprd  &&  { SVC="$SVC umtprd"; FS="y"; }
+
+# Is this a serial interface gadget?
+test -e /dev/ttyGS0  &&  { SVC="$SVC gs0"; }
+
+
+# If there is network configure and start the services.
+#if [ "$NET" = "y" ]; then
+#    $DIR/conf.smbd "$CONF"  &&  {
+#    	SVC="$SVC smbd nmbd"; FS="y";
+#	$DIR/start smb-accounts &
+#	}
+#
+#    $DIR/conf.dlna "$CONF"  &&  SVC="$SVC dlna"
+#fi
+
+
+# Schedule updating the system's time.
+if [ "$NET" = "y" ]; then
+    $DIR/start rdate &
+fi
+
+
+# If we have a cytron run the button controller.
+[ "$HAVE_MAKER_PHAT" = "y" ]  &&  SVC="$SVC bctrl"
+
+
+# Now change /etc/inittab.
+[ "$SVC" != "" ]  &&  SVC="--start $SVC"
+$DIR/mb $1 --goto "g=$ENABLE" $SVC
+echo "# $ENABLE" "$SVC"
+

@@ -1,0 +1,19 @@
+
+RTD=/run/micro-boot
+ETC=/etc/micro-boot
+CONF="$ETC"
+
+# Put your normal username here.
+USERNAME=pi
+
+# Provide a server with time service on port tcp/37.
+RDATE_SERVER="time.nist.gov"
+
+# Do we have a Cytron Maker pHat?  If there is one
+# its buttons are queried to get the current gadget
+# mode.
+HAVE_MAKER_PHAT="n"
+
+# Should the selected mode become permament?
+PHAT_MODE_PERMA=y
+

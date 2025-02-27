@@ -1,0 +1,43 @@
+#!/bin/sh
+
+# Helper script to start services.
+#
+# Services go here mostly when they cannot be started from init
+# because they use shell functionality like
+#
+#  - environment variables
+#  - (short) command sequences
+#
+
+DIR=${0%/*}
+. $DIR/environment  ||  exit 1
+
+case "$1" in
+    dlna|minidlnad)
+	CF="$CONF/minidlna.conf"
+    	exec minidlnad -v -S -f $CF -R -u $USERNAME -P $RTD/minidlnad.pid
+	;;
+
+    bctrl)	exec python $DIR/bctrl.py;;
+
+    smbd)	exec /usr/sbin/smbd --no-process-group -F -s "$CONF/smb.conf";;
+    nmbd)	exec /usr/sbin/nmbd --no-process-group -F -s "$CONF/smb.conf";;
+
+    monitor)	exec "$DIR/file-mon" "$RTD/monitor.d" "$CONF/monitor.conf" \
+    			>"$RTD/monitor.log" 2>&1;;
+
+    userver)	exec /home/pi/work/userver/userver -f "$DIR/userver.conf" \
+    			/home/pi/public/ >>/var/log/userver.log 2>&1;;
+
+    umtprd)	exec /usr/sbin/umtprd -conf "$CONF/umtprd.conf" \
+    			>$RTD/umtprd.log 2>&1;;
+
+    # The following commands are started from configure.
+    rdate)	sleep 20; busybox rdate "$RDATE_SERVER";;
+
+    *)
+	echo "$0: bad name: $1" >&2
+	exit 1;;
+esac
+
+

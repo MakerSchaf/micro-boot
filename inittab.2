@@ -1,0 +1,64 @@
+
+# Initialize the system.
+::sysinit:/etc/micro-boot/sysinit
+::wait:/etc/micro-boot/configure
+
+# --- Console logins
+# A shell on the console device.  No password is
+# required.
+tty1::askfirst:/etc/micro-boot/user-login pi
+
+# More shells.
+tty2::askfirst:/etc/micro-boot/user-login pi
+tty3::askfirst:/bin/bash --login
+tty4::askfirst:/bin/bash --login
+
+# Start a login on the serial interface.  This needs
+# `enable_uart=1` in /boot/config.txt.  Put it there
+# or use `sudo raspi-config` to enable the serial
+# console.  Deactivate this line if you wotk without
+# the serial interface.
+#::respawn:/sbin/agetty -l /usr/bin/login 115200 serial0
+
+
+# --- Signal actions.
+# Restart busybox init (not properly working).
+::restart:/bin/busybox init
+#::restart:/sbin/init
+
+# Reboot and shutdown actions.
+::ctrlaltdel:/etc/micro-boot/shutdown reboot
+::shutdown:/etc/micro-boot/shutdown
+
+
+# --- Core services.
+# Syslog service and dbus.
+::respawn:busybox syslogd -n
+::respawn:/usr/bin/dbus-daemon --config-file=/usr/share/dbus-1/system.conf --nofork --syslog-only --nopidfile
+
+
+:n:respawn:avahi-daemon --syslog
+
+# Make sure there's a ssh daemon.
+::respawn:/usr/sbin/sshd -D
+
+# Shutdown by button.
+:.:respawn:/etc/micro-boot/start bctrl
+
+# Network interfaces.
+#:u:respawn:/etc/micro-boot/usb-dhcpd
+:w:respawn:wpa_supplicant -c /etc/wpa_supplicant/wpa_supplicant.conf -i wlan0
+:w:respawn:dhclient -d wlan0
+#:e:respawn:dhclient eth0
+
+# Serial interface on USB.
+#:id=gs0:respawn:/sbin/agetty -8 -l /usr/bin/login 115200 ttyGS0
+
+# MTP responder.
+#:x:respawn:/etc/micro-boot/start umtprd
+
+# Network services.
+#-#:n:respawn:busybox httpd -f -p 80 -h /home/pi/public
+#-#:n:respawn:/etc/micro-boot/start smbd
+#-#:n:respawn:/etc/micro-boot/start minidlnad
+

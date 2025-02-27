@@ -1,0 +1,212 @@
+#!/bin/sh
+#
+
+
+error() {
+	echo "$0: $*" >&2
+	exit 1
+	}
+
+
+list_init_children() {
+    /usr/bin/awk '#
+	BEGIN {
+		pid = 1;
+
+		cmd = "ps -eo pid,ppid,cmd"
+		while (cmd | getline > 0) {
+			if ($2 == pid) {
+				$2 = "";
+				sub(/ +/, " ", $0);
+				if ($0 ~ /^[0-9]+ init$/)
+					continue;
+
+				print $0
+				}
+			}
+		}' "$@"
+	}
+
+
+check_root() {
+	[ "$ID" != "0" ]  &&  error "must be root"
+	}
+
+
+ask_update() {
+	local ans
+
+	printf "current: %s\n\nupdate: %s\n\nupdate [y/N]? " "$CUR" "$NEXT"
+	read ans
+	[ "$ans" = "y" ]  &&  return 0
+
+	echo "cancelled"
+	return 1
+	}
+
+uninstall() {
+	check_root
+	FILE=/boot/firmware/cmdline.txt
+	test -f $FILE  ||  error "file not found: $FILE"
+
+	CUR=$(cat $FILE)
+	NEXT=$(sed 's/ *init=[^ ]*//' $FILE)
+	! ask_update  &&  return
+	echo "$CUR" >${FILE}~
+	echo "$NEXT" >${FILE}
+	ls -l ${FILE} ${FILE}~
+
+	ETAB="/etc/inittab"
+	[ -h "$ETAB" ]  &&  rm "$ETAB"
+
+	TG=/usr/bin/mb
+	[ -h "$TG" ]  &&  { rm "$TG"  ||  exit 1; }
+	}
+
+
+# Check that is `$1` is a file it is also a symlink.
+#check_symlink() {
+#	[ -f "$1" ]  &&  [ ! -h "$1" ]  &&
+#		error "$1: exists and is not a symlink."
+#	}
+
+# Make `$1` is a symlink to `$2`.
+make_symlink() {
+	local D
+	if [ -e "$1" ]; then
+		# `$1` may already point to `$2`.
+		D=$(realpath "$1")
+		[ "$D" = "$2" ]  &&  {
+			# echo "$1: link exists already."
+			return 0; }
+
+		# Remove `$1`.
+		rm "$1"  ||  exit 1;
+	fi
+
+	# Create the link.
+	ln -s "$2" "$1"  ||  exit 1
+	}
+
+install() {
+	local BOOT=$1
+	[ "$#" = 0  -o  "$BOOT" = "" ]  &&  {
+		echo "usage: $0 install <dir>" >&2; exit 1; }
+
+	INIT="$BOOT/init"
+	make_symlink "$INIT" /usr/bin/busybox
+	[ -x "$INIT" ]  ||  error "not executable: $INIT"
+
+	ITAB="$BOOT/inittab"
+	[ -f "$ITAB" ]  ||  error "inittab not found: $ITAB"
+
+	ETAB="/etc/inittab"
+	[ -f "$ETAB"  -a  ! -h "$ETAB" ]  &&
+		error "$ETAB is not a symbolic link"
+
+	check_root
+	FILE=${2-/boot/firmware/cmdline.txt}
+	test -f $FILE  ||  error "file not found: $FILE"
+
+	# Show changes and ask for confirmation.
+	CUR=$(cat $FILE)
+	NEXT=$(sed -E "s!( *init=[^ ]*|\$)! init=$INIT!" $FILE)
+	! ask_update  &&  return
+
+	# Install our inittab.  If we fail here cmdline.txt is
+	# unchanged.
+	[ -e "$ETAB" ]  &&  { rm "$ETAB"  ||  exit 1; }
+	ln -s "$ITAB" "$ETAB"  ||  exit 1
+
+	# Update cmdline.txt
+	echo "$CUR" >${FILE}~
+	echo "$NEXT" >${FILE}
+
+	# Create /usr/bin/mb
+	MB=$BOOT/mb
+	TG=/usr/bin/mb
+	[ -h "$TG" ]  &&  { rm "$TG"  ||  exit 1; }
+	[ ! -x "$MB" ]  &&  {
+		echo "executable not found: $MB" >&21; return; }
+
+	echo "installing $MB"
+	ln -s "$MB" "$TG"
+	ls -l "$ETAB" "$INIT" ${FILE} ${FILE}~ "$TG"
+	}
+
+send_signal() {
+	local p N SIG PID
+	SIG="-TERM"
+	[ "${1%-*}" != "$1" ]  && { SIG="$1"; shift; }
+	for N in $@; do
+	    PID=""
+	    pidfile=$(find -P /run -xdev -name "${N}.pid" 2>/dev/null |
+	              head -1)
+	    if [ "$pidfile" != "" ]; then
+	        PID=$(cat $pidfile)
+	    else
+	        p=$(pidof ${N})
+		[ "$p" != "" ]  &&  [ "${p%% *}" = "$p" ]  &&  PID="$p"
+	    fi
+
+	    if [ "$PID" = "" ]; then
+	        echo "$0: no such pidfile: ${N}.pid"
+	    else
+	        /bin/kill "$SIG" $PID
+	    fi
+	done
+	}
+
+
+p=$(realpath "$0")
+DIR=${p%/*}
+ID=$(id -u)
+
+KW="active halt inactive install kill \
+	logfile \
+	poweroff reboot reload running shutdown signal uninstall"
+
+# `shift` needs adaption of edit-inittab code below.
+OP=""
+if [ "$#" != 0 ]; then
+    OP="$1"
+
+    for kw in $KW; do
+        [ "${kw#$OP*}" != "$kw" ]  &&  { OP=$kw; break; }
+    done
+fi
+
+case "$OP" in
+  --*|"")	;;	# Pass through.
+  help)		echo -n "available commands:"; for i in $KW; \
+  			do echo -n " $i"; done; echo; exit;;
+
+  shutdown)	check_root; exec busybox halt;;
+  reboot|halt|poweroff)
+    check_root; exec busybox $OP;;
+
+  kill|signal)	shift; send_signal "$@"; exit;;
+  logfile)	exec tail -F /var/log/messages;;
+  reload)	check_root; exec kill -HUP 1;;
+
+  uninstall)	shift; uninstall "$@"; exit;;
+  install)	shift; install "$@";  exit;;
+
+  active)	exec awk -F: '$0 !~ /^#/  &&  $0 != ""  &&  $2 != ""' /etc/inittab;;
+  inactive)	exec awk -F: '$0 ~ /^#/  &&  $2 != ""' /etc/inittab;;
+  running)	list_init_children; exit;;
+
+  ps)		shift; pgrep -af "${@-.}" | awk '$2 !~ /^\[/'; exit;;
+  *)		echo "$0: unknown operation: $OP" >&2; exit 1;;
+esac
+
+
+if [ `id -u` != 0  -o  "$#" = 0  -o "$1" = "--print" ]; then
+    [ "$1" = "--mod" ]  &&  shift
+    $DIR/edit-inittab -- --mod --file /etc/inittab "$@"
+    exit
+fi
+
+$DIR/edit-inittab -- --file /etc/inittab "$@"  &&  kill -HUP 1
+exit
+

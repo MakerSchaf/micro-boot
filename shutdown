@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+
+# Supplying a parameter bypasses busybox.
+WHAT="$1"
+
+fake-hwclock save
+sync
+/sbin/dphys-swapfile swapoff
+umount -a -r
+
+
+case "$WHAT" in
+    "")		exit 0;;
+    h*)		busybox halt -f;;
+    p*)		busybox poweroff -f;;
+    r*)		busybox reboot -f;;
+    *)		busybox poweroff -f;;
+esac
+
+# We never get here.
+echo "$0: internal error"
+exit 1
+

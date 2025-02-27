@@ -1,0 +1,261 @@
+#/bin/sh
+
+#
+# This script is part of another project and contains functionality
+# which is not working or supported here.
+#
+
+#set -x
+
+
+# Terminate if USB is not empty.
+
+if [ "$(lsusb | wc -l)" -gt "1" ]; then
+    echo "USB devices found: not activating gadget"
+    exit
+fi
+
+echo "activating USB gadget"
+
+if [ "$1" != "" ]; then
+    MODE="$1"
+else
+    FN="${0%/*}/gadget-mode"
+    test -f "$FN"  &&  MODE=$(cat $FN)  ||  MODE=mtp
+fi
+
+#MODE=rndis
+case $MODE in
+  serial)		MODE=serial;;
+  mtp)			MODE=mtp;;
+  eth|ether)		MODE=eth; HAVE_SERIAL=y;;
+  rndis)		MODE=rndis; HAVE_SERIAL=y;;
+  *)			MODE=eth;;
+esac
+echo "gadget mode= $MODE"
+
+
+
+GADGET_BASE=/sys/kernel/config/usb_gadget
+g=${GADGET_BASE}/g1
+
+
+# Network configuration.
+HOST_ADDR="22:22:33:44:55:66"
+DEV_ADDR="12:bb:cc:dd:ee:f1"
+DEV_IP="169.254.233.90"
+
+# Set DISK to get the USB disk drive.
+#DISK="/home/pi/usb.disk"
+DISK=
+
+# Disk size in MB.
+DISK_SIZE="1024"
+
+MOUNT_DIR=/run/micro-boot
+
+
+# make_disk <image> <size>
+#
+#  Create a vfat disk image $1 if the file does not exist.
+#  Size is $2 MB.
+#
+
+make_disk() {
+	local DISK SIZE
+
+	DISK="$1"
+
+	if [ ! -f "$DISK" ]; then
+		dd if=/dev/zero of="$DISK" bs="1M" \
+			seek="${DISK_SIZE:-2048}" count=0  &&
+		mkfs -t vfat "DISK"
+	fi
+    }
+
+
+# -------------------------------------------------------------------
+# libcomposite based gadget.
+
+
+activate_gadget() {
+	set -e
+
+	# Script from https://www.isticktoit.net/?p=1383
+	#
+	# See https://www.kernel.org/doc/html/latest/usb/gadget-testing.html
+	# for description of the possible parameters.
+
+
+	mkdir ${g}
+
+	echo 0x1d6b > ${g}/idVendor # Linux Foundation
+	echo 0x0104 > ${g}/idProduct # Multifunction Composite Gadget
+	echo 0x0100 > ${g}/bcdDevice # v1.0.0
+	echo 0x0200 > ${g}/bcdUSB # USB2
+
+	echo 0xEF   > ${g}/bDeviceClass
+	echo 0x02   > ${g}/bDeviceSubClass
+	echo 0x01   > ${g}/bDeviceProtocol
+
+	mkdir -p ${g}/strings/0x409
+	echo "4K89-2377-1193" > ${g}/strings/0x409/serialnumber
+	echo "No such manufacturer" > ${g}/strings/0x409/manufacturer
+	echo "$NAME USB Device" > ${g}/strings/0x409/product
+
+
+	mkdir -p ${g}/configs/c.1/strings/0x409
+	echo "USB Device" > ${g}/configs/c.1/strings/0x409/configuration
+	echo 80 > ${g}/configs/c.1/MaxPower
+
+	# Add functions here
+	#
+	# Not all function are compatible with each other.  E.g.
+	# MTP device does not work with USB ethernet: usb0 is
+	# configured but not working.  However, having usb0 does 
+	# not interfere with the MTP device so it's safe to
+	# configure network.
+
+	# Network interface
+	#
+	# Modern Linuxes may expect DHCP to configure their
+	# USB interface.
+	#
+	if [ "$MODE" = "eth" ]; then
+	    HAVE_ETH="y"
+
+	    mkdir -p ${g}/functions/ecm.usb0
+	    echo "$HOST_ADDR" >${g}/functions/ecm.usb0/host_addr
+	    echo "$DEV_ADDR" >${g}/functions/ecm.usb0/dev_addr
+	    ln -s ${g}/functions/ecm.usb0 ${g}/configs/c.1/
+
+	fi
+
+	if [ "$MODE" = "rndis" ]; then
+	    HAVE_ETH="y"
+
+	    HOST_ADDR="22:22:33:44:55:66"
+	    DEV_ADDR="22:bb:cc:dd:ee:f1"
+	    # Create an RNDIS device
+	    # https://github.com/ev3dev/ev3-systemd/blob/ev3dev-jessie/scripts/ev3-usb.sh
+	    #mkdir ${g}/configs/c.1
+	    #echo "80" > ${g}/configs/c.1/MaxPower
+
+	    echo 0x02   > ${g}/bDeviceClass
+	    echo 0x02   > ${g}/bDeviceSubClass
+	    echo "RNDIS" > ${g}/configs/c.1/strings/0x409/configuration
+
+	    # This is a Microsoft device
+	    echo "1" > ${g}/os_desc/use
+	    echo "0xcd" > ${g}/os_desc/b_vendor_code
+	    echo "MSFT100" > ${g}/os_desc/qw_sign
+
+	    # Create the RNDIS function, including the Microsoft-specific bits
+	    ms_subcompat_id="5162001"
+
+	    mkdir ${g}/functions/rndis.usb0
+	    echo "$DEV_ADDR" > ${g}/functions/rndis.usb0/dev_addr
+	    echo "$HOST_ADDR" > ${g}/functions/rndis.usb0/host_addr
+	    echo "RNDIS" > ${g}/functions/rndis.usb0/os_desc/interface.rndis/compatible_id
+	    echo "$ms_subcompat_id" > ${g}/functions/rndis.usb0/os_desc/interface.rndis/sub_compatible_id
+
+	    ln -s ${g}/functions/rndis.usb0 ${g}/configs/c.1
+	    ln -s ${g}/configs/c.1 ${g}/os_desc
+	fi
+
+	# Function FS
+	#
+	# This configures functionfs for umtprd.
+	#
+	if [ "$MODE" = "mtp"  -o  "$HAVE_MTP" = "y" ]; then
+	    HAVE_MTP="y"
+
+	    mkdir ${g}/functions/ffs.usb0
+	    ln -s ${g}/functions/ffs.usb0 ${g}/configs/c.1/
+
+	    modprobe gadgetfs
+	fi
+
+	# Serial interface
+	#
+	# Requires `/sbin/agetty -8 -l /usr/bin/login 115200 ttyGS0`.
+	# A Linux host will show the device as /dev/ttyACM0.
+	#
+	if [ "$MODE" = "serial"  -o  "$HAVE_SERIAL" = "y" ]; then
+	    HAVE_SERIAL="y"
+
+	    mkdir -p ${g}/functions/acm.usb0
+	    ln -s ${g}/functions/acm.usb0 ${g}/configs/c.1/
+	fi
+
+
+	# Mass storage
+	#
+	# Use
+	#
+	#   echo 1 > ${g}/functions/mass_storage.usb0/lun.0/forced_eject
+	#
+	# to unmount the disk from the host and
+	#
+	#   echo /path/to/another-disk > ${g}/functions/mass_storage.usb0/lun.0/file
+	#
+	# to mount another (or remount).
+	#
+	if [ "$HAVE_DISK" = "y" ]  &&  [ "$DISK" != "" ]; then
+		if [ ! -f "$DISK" ]; then
+			dd if=/dev/zero of="$DISK" bs="1M" \
+				seek="${DISK_SIZE-512}" count=0
+			mkfs -t vfat "$DISK"
+		fi
+
+		mkdir -p "${g}/functions/mass_storage.usb0"
+		echo 1 >"${g}/functions/mass_storage.usb0/stall"
+		echo 0 >"${g}/functions/mass_storage.usb0/lun.0/cdrom"
+		echo 0 >"${g}/functions/mass_storage.usb0/lun.0/ro"
+		echo 0 >"${g}/functions/mass_storage.usb0/lun.0/nofua"
+		echo 1 >"${g}/functions/mass_storage.usb0/lun.0/removable"
+		echo "$DISK" >"${g}/functions/mass_storage.usb0/lun.0/file"
+		
+		ln -s "${g}/functions/mass_storage.usb0" "${g}/configs/c.1/"
+	fi
+
+
+	# End functions
+	ls /sys/class/udc > ${g}/UDC  ||  true
+	set +e
+    }
+
+
+
+
+modprobe libcomposite
+if activate_gadget; then
+    # Configure some additional stuff.
+    if [ "$HAVE_ETH" = "y" ]; then
+	ifconfig usb0 "$DEV_IP" netmask 255.255.0.0 up
+    fi
+
+    if [ "$HAVE_DISK" = "y" ]; then
+	#NAME="${NAME##*/}"
+	MP="$MOUNT_DIR/flash-disk"
+	mkdir -p "$MP"  &&  mount -o "users,umask=000" "$DISK" "$MP"
+    fi
+
+    if [ "$HAVE_MTP" = "y" ]; then
+	FMP=/dev/ffs-mtp
+	if ! mountpoint -q $FMP; then
+	    mkdir -p $FMP
+	    mount -t functionfs usb0 $FMP
+	fi
+
+	GMP=/dev/gadget
+	if ! mountpoint -q $GMP; then
+	    mkdir -p $GMP
+	    mount -t gadgetfs gadgetfs /dev/gadget
+	fi
+    fi
+
+fi
+
+date
+
